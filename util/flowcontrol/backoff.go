@@ -17,12 +17,15 @@ limitations under the License.
 package flowcontrol
 
 import (
+	"math/rand"
 	"sync"
 	"time"
 
 	"k8s.io/apimachinery/pkg/util/clock"
 	"k8s.io/utils/integer"
 )
+
+const DefaultJitterRatio = 0.1
 
 type backoffEntry struct {
 	backoff    time.Duration
@@ -35,6 +38,11 @@ type Backoff struct {
 	defaultDuration time.Duration
 	maxDuration     time.Duration
 	perItemBackoff  map[string]*backoffEntry
+	random          *rand.Rand
+}
+
+func randomSource() *rand.Rand {
+	return rand.New(rand.NewSource(time.Now().UTC().UnixNano()))
 }
 
 func NewFakeBackOff(initial, max time.Duration, tc *clock.FakeClock) *Backoff {
@@ -43,6 +51,7 @@ func NewFakeBackOff(initial, max time.Duration, tc *clock.FakeClock) *Backoff {
 		Clock:           tc,
 		defaultDuration: initial,
 		maxDuration:     max,
+		random:          randomSource(),
 	}
 }
 
@@ -52,6 +61,7 @@ func NewBackOff(initial, max time.Duration) *Backoff {
 		Clock:           clock.RealClock{},
 		defaultDuration: initial,
 		maxDuration:     max,
+		random:          randomSource(),
 	}
 }
 
@@ -67,6 +77,13 @@ func (p *Backoff) Get(id string) time.Duration {
 	return delay
 }
 
+// addJitter takes a duration, and increases it by up to jitterRatio.
+func addJitter(d time.Duration, jitterRatio float64) time.Duration {
+	jitter := rand.Int63n(int64(float64(d) * jitterRatio))
+	d += time.Duration(jitter)
+	return d
+}
+
 // move backoff to the next mark, capping at maxDuration
 func (p *Backoff) Next(id string, eventTime time.Time) {
 	p.Lock()
@@ -75,8 +92,12 @@ func (p *Backoff) Next(id string, eventTime time.Time) {
 	if !ok || hasExpired(eventTime, entry.lastUpdate, p.maxDuration) {
 		entry = p.initEntryUnsafe(id)
 	} else {
-		delay := entry.backoff * 2 // exponential
-		entry.backoff = time.Duration(integer.Int64Min(int64(delay), int64(p.maxDuration)))
+		// Get previous delay, but remove any jitter above the maximum base.
+		// This is necessary to ensure that the jitter doesn't get longer and longer on every backoff.
+		cappedPreviousDelay := time.Duration(integer.Int64Min(int64(entry.backoff), int64(p.maxDuration)))
+
+		baseDelay := time.Duration(integer.Int64Min(int64(cappedPreviousDelay*2), int64(p.maxDuration))) // exponential backoff, with a cap
+		entry.backoff = addJitter(baseDelay, DefaultJitterRatio)                                         // add jitter to the delay
 	}
 	entry.lastUpdate = p.Clock.Now()
 }
