@@ -1319,8 +1319,11 @@ func TestBackoffLifecycle(t *testing.T) {
 	for _, sec := range seconds {
 		thisBackoff := request.backoff.CalculateBackoff(request.URL())
 		t.Logf("Current backoff %v", thisBackoff)
-		if thisBackoff != time.Duration(sec)*time.Second {
-			t.Errorf("Backoff is %v instead of %v", thisBackoff, sec)
+		expectBaseBackoff := time.Duration(sec) * time.Second
+		expectMaxBackoffNanoseconds := int64(float64(expectBaseBackoff.Nanoseconds()) * (float64(1) + flowcontrol.DefaultJitterRatio))
+		expectMaxBackoff := time.Duration(expectMaxBackoffNanoseconds)
+		if thisBackoff < expectBaseBackoff || thisBackoff > expectMaxBackoff {
+			t.Errorf("Backoff is %v outside range %v to %v", thisBackoff, expectBaseBackoff, expectMaxBackoff)
 		}
 		now := clock.Now()
 		request.DoRaw()

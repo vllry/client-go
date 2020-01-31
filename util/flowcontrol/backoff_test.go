@@ -33,9 +33,15 @@ func TestSlowBackoff(t *testing.T) {
 	cases := []time.Duration{0, 1, 2, 4, 8, 16, 32, 50, 50, 50}
 	for ix, c := range cases {
 		tc.Step(step)
-		w := b.Get(id)
-		if w != c*step {
-			t.Errorf("input: '%d': expected %s, got %s", ix, c*step, w)
+		wait := b.Get(id)
+
+		// TODO(vllry) account for nested jitter.
+		expectBaseBackoff := c * step
+		expectMaxBackoffNanoseconds := int64(float64(expectBaseBackoff.Nanoseconds()) * (float64(1) + DefaultJitterRatio))
+		expectMaxBackoff := time.Duration(expectMaxBackoffNanoseconds)
+
+		if wait < expectBaseBackoff || wait > expectMaxBackoff {
+			t.Errorf("input: '%d': expected between %s and %s, got %s", ix, expectBaseBackoff, expectMaxBackoff, wait)
 		}
 		b.Next(id, tc.Now())
 	}
@@ -79,21 +85,24 @@ func TestBackoffHighWaterMark(t *testing.T) {
 	id := "_idHiWaterMark"
 	tc := clock.NewFakeClock(time.Now())
 	step := time.Second
-	maxDuration := 5 * step
-	b := NewFakeBackOff(step, maxDuration, tc)
+	maxBaseDuration := 5 * step
+	maxTotalNanoseconds := int64(float64(maxBaseDuration.Nanoseconds()) * (float64(1) + DefaultJitterRatio))
+	maxTotalDuration := time.Duration(maxTotalNanoseconds)
+	b := NewFakeBackOff(step, maxBaseDuration, tc)
 
-	// get to backoff = maxDuration
-	for i := 0; i <= int(maxDuration/step); i++ {
+	// get to backoff = maxBaseDuration
+	for i := 0; i <= int(maxBaseDuration/step); i++ {
 		tc.Step(step)
 		b.Next(id, tc.Now())
 	}
 
-	// backoff high watermark expires after 2*maxDuration
-	tc.Step(maxDuration + step)
+	// backoff high watermark expires after 2*maxBaseDuration
+	tc.Step(maxBaseDuration + step)
 	b.Next(id, tc.Now())
 
-	if b.Get(id) != maxDuration {
-		t.Errorf("expected Backoff to stay at high watermark %s got %s", maxDuration, b.Get(id))
+	currentBackOff := b.Get(id)
+	if currentBackOff < maxBaseDuration || currentBackOff > maxTotalDuration {
+		t.Errorf("expected Backoff to stay at high watermark %s to %s, got %s", maxBaseDuration, maxTotalDuration, b.Get(id))
 	}
 }
 
@@ -129,8 +138,8 @@ func TestIsInBackOffSinceUpdate(t *testing.T) {
 	id := "_idIsInBackOffSinceUpdate"
 	tc := clock.NewFakeClock(time.Now())
 	step := time.Second
-	maxDuration := 10 * step
-	b := NewFakeBackOff(step, maxDuration, tc)
+	maxBaseDuration := 10 * step
+	b := NewFakeBackOff(step, maxBaseDuration, tc)
 	startTime := tc.Now()
 
 	cases := []struct {
@@ -184,8 +193,14 @@ func TestIsInBackOffSinceUpdate(t *testing.T) {
 			t.Errorf("expected IsInBackOffSinceUpdate %v got %v at tick %s", c.inBackOff, b.IsInBackOffSinceUpdate(id, tc.Now()), c.tick*step)
 		}
 
-		if c.inBackOff && (time.Duration(c.value)*step != b.Get(id)) {
-			t.Errorf("expected backoff value=%s got %s at tick %s", time.Duration(c.value)*step, b.Get(id), c.tick*step)
+		// TODO(vllry) account for nested jitter.
+		expectBaseBackoff := time.Duration(c.value) * step
+		maxTotalNanoseconds := int64(float64(expectBaseBackoff.Nanoseconds()) * (float64(1) + DefaultJitterRatio))
+		maxTotalDuration := time.Duration(maxTotalNanoseconds)
+		wait := b.Get(id)
+
+		if c.inBackOff && (wait < expectBaseBackoff || wait > maxTotalDuration) {
+			t.Errorf("expected backoff between %s and %s, got %s at tick %s", expectBaseBackoff, maxTotalDuration, wait, c.tick*step)
 		}
 
 		if !c.inBackOff {
